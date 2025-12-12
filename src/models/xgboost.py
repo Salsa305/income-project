@@ -24,153 +24,6 @@ from sklearn.metrics import (
 from sklearn.model_selection import StratifiedKFold, cross_val_score
 from typing import Dict
 
-
-def run_xgboost(
-    X_train, X_test, y_train, y_test,
-    preprocessor,
-    objective="binary:logistic",
-    max_depth=5,
-    learning_rate=0.1,
-    n_estimators=100,
-    subsample=1.0,
-    colsample_bytree=1.0,
-    scale_pos_weight=None,
-    early_stopping_rounds=None,
-    eval_set=None,
-) -> Dict:
-    """
-    Train and evaluate an XGBoost classifier.
-
-    Args:
-        X_train, X_test: Training and test features
-        y_train, y_test: Training and test labels
-        preprocessor: sklearn preprocessor (ColumnTransformer)
-        objective: Loss function to use. Options: 'binary:logistic', etc.
-        max_depth: Maximum tree depth
-        learning_rate: Learning rate (eta)
-        n_estimators: Number of boosting rounds
-        subsample: Subsample ratio of training instances
-        colsample_bytree: Subsample ratio of features
-        scale_pos_weight: Weight for positive class
-        early_stopping_rounds: Rounds for early stopping (requires eval_set)
-        eval_set: Evaluation set for early stopping
-
-    Returns:
-        dict with keys:
-            - 'pipeline': Fitted sklearn Pipeline
-            - 'auc': ROC-AUC score on test set
-            - 'pr_auc': PR-AUC score on test set (NEW)
-            - 'f05_score': F0.5 score on test set (Precision-favored) (UPDATED)
-            - 'report': Custom classification report (UPDATED)
-            - 'y_pred': Predicted labels
-            - 'y_proba': Predicted probabilities
-            - 'confusion_matrix': Confusion matrix
-    """
-
-    model = XGBClassifier(
-        objective=objective,
-        max_depth=max_depth,
-        learning_rate=learning_rate,
-        n_estimators=n_estimators,
-        subsample=subsample,
-        colsample_bytree=colsample_bytree,
-        scale_pos_weight=scale_pos_weight,
-        early_stopping_rounds=early_stopping_rounds,
-        eval_metric="auc",
-        random_state=42,
-        verbosity=0,
-    )
-
-    pipe = Pipeline([
-        ("preprocessor", preprocessor),
-        ("model", model)
-    ])
-
-    pipe.fit(X_train, y_train)
-
-    y_pred = pipe.predict(X_test) # Predictions at default threshold 0.5
-    y_proba = pipe.predict_proba(X_test)[:, 1]
-    cm = confusion_matrix(y_test, y_pred)
-    
-    # --- 1. Calculate Ranking Metrics ---
-    roc_auc = roc_auc_score(y_test, y_proba)
-    pr_auc = average_precision_score(y_test, y_proba)
-    
-    # --- 2. Calculate F0.5 Score at 0.5 Threshold ---
-    # F0.5 score penalizes False Positives more than False Negatives
-    f05_score_at_05 = fbeta_score(y_test, y_pred, beta=0.5, zero_division=0)
-
-    # --- 3. Generate Classification Report (Full Standard Metrics) ---
-    report_str = classification_report(y_test, y_pred, digits=4, output_dict=False)
-    
-    # --- 4. Append Goal-Aligned Metrics to the Report String ---
-    summary_data = {
-        'PR-AUC': [pr_auc],
-        'ROC-AUC': [roc_auc]
-    }
-    df_summary = pd.DataFrame(summary_data, index=['Ranking Metrics']).T 
-    summary_str = df_summary.to_string(float_format='%.4f')
-    
-    final_report = f"""
-Standard Classification Report (@ Threshold 0.5):
-{report_str}
-
----------------------------------------------
-Goal-Aligned Ranking Metrics (Threshold-Independent):
-
-{summary_str}
----------------------------------------------
-"""
-    
-    # --- 5. Return in the EXACT requested structure ---
-    return {
-        "pipeline": pipe,
-        "auc": roc_auc, # ROC-AUC
-        "pr_auc": pr_auc, # PR-AUC (New, important metric)
-        "f05_score": f05_score_at_05, # F0.5 at default 0.5 threshold
-        "report": final_report, # Customized report
-        "y_pred": y_pred,
-        "y_proba": y_proba,
-        "confusion_matrix": cm,
-    }
-
-
-def cross_validate_xgboost(
-    X,
-    y,
-    preprocessor,
-    objective="binary:logistic",
-    max_depth=5,
-    learning_rate=0.1,
-    n_estimators=100,
-    cv=5,
-    # CHANGE: Default scoring to PR-AUC (average_precision)
-    scoring="average_precision",
-):
-    """
-    Perform stratified k-fold cross-validation for XGBoost, defaulting to PR-AUC scoring.
-    """
-
-    model = XGBClassifier(
-        objective=objective,
-        max_depth=max_depth,
-        learning_rate=learning_rate,
-        n_estimators=n_estimators,
-        random_state=42,
-        verbosity=0,
-    )
-
-    pipe = Pipeline([
-        ("preprocessor", preprocessor),
-        ("model", model)
-    ])
-
-    skf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=42)
-    scores = cross_val_score(pipe, X, y, cv=skf, scoring=scoring)
-
-    return scores
-
-
 def compare_objectives(
     X_train,
     X_test,
@@ -203,6 +56,149 @@ def compare_objectives(
             n_estimators=n_estimators,
         )
     return results
+
+def run_xgboost(
+    X_train, X_test, y_train, y_test,
+    preprocessor,
+    objective="binary:logistic",
+    max_depth=5,
+    learning_rate=0.1,
+    n_estimators=100,
+    # --- FIX: ADD MISSING REGULARIZATION PARAMETERS ---
+    min_child_weight=1,  # Added
+    gamma=0,             # Added
+    # --------------------------------------------------
+    subsample=1.0,
+    colsample_bytree=1.0,
+    scale_pos_weight=None,
+    early_stopping_rounds=None,
+    eval_set=None,
+) -> Dict:
+    """
+    Train and evaluate an XGBoost classifier, now including min_child_weight and gamma.
+    """
+
+    model = XGBClassifier(
+        objective=objective,
+        max_depth=max_depth,
+        learning_rate=learning_rate,
+        n_estimators=n_estimators,
+        # --- FIX: PASS REGULARIZATION PARAMETERS TO MODEL INSTANTIATION ---
+        min_child_weight=min_child_weight, # Passed to model
+        gamma=gamma,                       # Passed to model
+        # ------------------------------------------------------------------
+        subsample=subsample,
+        colsample_bytree=colsample_bytree,
+        scale_pos_weight=scale_pos_weight,
+        early_stopping_rounds=early_stopping_rounds,
+        eval_metric="auc",
+        random_state=42,
+        verbosity=0,
+    )
+
+    pipe = Pipeline([
+        ("preprocessor", preprocessor),
+        ("model", model)
+    ])
+
+    # NOTE: The fit method requires X_train and y_train
+    # If using early_stopping_rounds, eval_set must be specified in fit()
+    pipe.fit(X_train, y_train)
+
+    y_pred = pipe.predict(X_test) # Predictions at default threshold 0.5
+    y_proba = pipe.predict_proba(X_test)[:, 1]
+    cm = confusion_matrix(y_test, y_pred)
+
+    # --- 1. Calculate Ranking Metrics ---
+    roc_auc = roc_auc_score(y_test, y_proba)
+    pr_auc = average_precision_score(y_test, y_proba)
+
+    # --- 2. Calculate F0.5 Score at 0.5 Threshold ---
+    # F0.5 score penalizes False Positives more than False Negatives
+    f05_score_at_05 = fbeta_score(y_test, y_pred, beta=0.5, zero_division=0)
+
+    # --- 3. Generate Classification Report (Full Standard Metrics) ---
+    report_str = classification_report(y_test, y_pred, digits=4, output_dict=False)
+
+    # --- 4. Append Goal-Aligned Metrics to the Report String ---
+    summary_data = {
+        'PR-AUC': [pr_auc],
+        'ROC-AUC': [roc_auc]
+    }
+    df_summary = pd.DataFrame(summary_data, index=['Ranking Metrics']).T
+    summary_str = df_summary.to_string(float_format='%.4f')
+
+    final_report = f"""
+Standard Classification Report (@ Threshold 0.5):
+{report_str}
+
+---------------------------------------------
+Goal-Aligned Ranking Metrics (Threshold-Independent):
+
+{summary_str}
+---------------------------------------------
+"""
+
+    # --- 5. Return in the EXACT requested structure ---
+    return {
+        "pipeline": pipe,
+        "auc": roc_auc, # ROC-AUC
+        "pr_auc": pr_auc, # PR-AUC (New, important metric)
+        "f05_score": f05_score_at_05, # F0.5 at default 0.5 threshold
+        "report": final_report, # Customized report
+        "y_pred": y_pred,
+        "y_proba": y_proba,
+        "confusion_matrix": cm,
+    }
+
+
+def cross_validate_xgboost(
+    X,
+    y,
+    preprocessor,
+    objective="binary:logistic",
+    max_depth=5,
+    learning_rate=0.1,
+    n_estimators=100,
+    # --- ADD REGULARIZATION PARAMETERS TO FUNCTION SIGNATURE ---
+    min_child_weight=1, 
+    subsample=1.0,
+    colsample_bytree=1.0, 
+    gamma=0,
+    # -----------------------------------------------------------
+    cv=5,
+    scoring="average_precision",
+):
+    """
+    Perform stratified k-fold cross-validation for XGBoost with all hyperparameters.
+    """
+
+    model = XGBClassifier(
+        objective=objective,
+        max_depth=max_depth,
+        learning_rate=learning_rate,
+        n_estimators=n_estimators,
+        # --- PASS REGULARIZATION PARAMETERS TO MODEL INSTANTIATION ---
+        min_child_weight=min_child_weight, 
+        subsample=subsample,
+        colsample_bytree=colsample_bytree,
+        gamma=gamma,
+        # -------------------------------------------------------------
+        random_state=42,
+        verbosity=0,
+        # NOTE: eval_metric is often needed if verbosity=0 or using scikit-learn wrappers
+        eval_metric='logloss', 
+    )
+
+    pipe = Pipeline([
+        ("preprocessor", preprocessor),
+        ("model", model)
+    ])
+
+    skf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=42)
+    scores = cross_val_score(pipe, X, y, cv=skf, scoring=scoring)
+
+    return scores
 
 
 def hyperparameter_sweep(
@@ -544,10 +540,6 @@ def comprehensive_regularization_tuning(
                                 
                                 tuning_results[key] = pr_auc_score
                                 
-                                # Progress update every 64 combinations
-                                if count % 64 == 0:
-                                    print(f"  [{count:4d}/{total_combinations}] PR-AUC: {pr_auc_score:.6f}")
-
     # Get top 10 results
     top_results = sorted(tuning_results.items(), key=lambda x: x[1], reverse=True)[:10]
     
